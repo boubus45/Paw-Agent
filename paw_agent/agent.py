@@ -5,7 +5,7 @@ import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 from paw_agent.llama_client import LlamaCppClient
 from paw_agent.memory import SkillStore
@@ -50,6 +50,13 @@ class AgentResult:
     session_path: Path
 
 
+@dataclass(frozen=True)
+class ValidationCommand:
+    tool_name: str
+    command: str
+    workdir: Path
+
+
 class PawAgent:
     def __init__(self, cfg: Dict[str, Any], workspace: Path):
         self.cfg = cfg
@@ -76,7 +83,7 @@ class PawAgent:
         self.vector_top_k = int(cfg["agent"].get("vector_top_k", 4))
         self.vector_max_chars = int(cfg["agent"].get("vector_max_chars", 2600))
         self.vector_include_global = bool(cfg["agent"].get("vector_include_global", False))
-        self.validation_command = detect_validation_command(self.workspace)
+        self.root_validation_commands = detect_validation_commands(self.workspace, [])
 
     def run(self, user_goal: str) -> AgentResult:
         messages: List[Dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -86,14 +93,16 @@ class PawAgent:
         vector_context = self._vector_context(user_goal)
         if vector_context:
             messages.append({"role": "system", "content": vector_context})
-        if self.validation_command:
-            tool_name, command = self.validation_command
+        if self.root_validation_commands:
+            detected = "; ".join(
+                f"{v.tool_name} `{v.command}` in `{v.workdir}`" for v in self.root_validation_commands[:3]
+            )
             messages.append(
                 {
                     "role": "system",
                     "content": (
-                        f"Detected project validation command: use {tool_name} with command "
-                        f"`{command}` after changes."
+                        "Detected project validation command(s): "
+                        f"{detected}. After edits, validate the changed subproject(s)."
                     ),
                 }
             )
@@ -178,10 +187,10 @@ class PawAgent:
                     changed_files.append(str(args["path"]))
                     validation_attempted = False
                     validation_succeeded = False
-                    auto_validation = self._auto_validate_after_change()
+                    auto_validation = self._auto_validate_after_change(changed_files)
                     if auto_validation:
                         validation_attempted = True
-                        validation_succeeded = self._tool_succeeded(auto_validation)
+                        validation_succeeded = self._all_validations_succeeded(auto_validation)
                         messages.append(
                             {
                                 "role": "user",
@@ -242,14 +251,33 @@ class PawAgent:
         first = result.splitlines()[0].strip().lower() if result else ""
         return first == "exit_code=0"
 
-    def _auto_validate_after_change(self) -> str:
-        if not self.validation_command:
+    def _all_validations_succeeded(self, result: str) -> bool:
+        if not result.strip():
+            return False
+        blocks = [b.strip() for b in result.split("\n\n===\n\n") if b.strip()]
+        return bool(blocks) and all(self._tool_succeeded(block) for block in blocks)
+
+    def _auto_validate_after_change(self, changed_files: List[str]) -> str:
+        validations = detect_validation_commands(self.workspace, changed_files)
+        if not validations:
             return ""
-        tool_name, command = self.validation_command
-        try:
-            return self.tools.run(tool_name, {"command": command, "timeout_sec": 300})
-        except Exception as exc:
-            return f"TOOL_ERROR: automatic validation failed: {exc}"
+        outputs: List[str] = []
+        for validation in validations:
+            rel_workdir = str(validation.workdir.relative_to(self.workspace))
+            original_workspace = self.tools.workspace
+            try:
+                self.tools.workspace = validation.workdir
+                result = self.tools.run(validation.tool_name, {"command": validation.command, "timeout_sec": 300})
+            except Exception as exc:
+                result = f"TOOL_ERROR: automatic validation failed: {exc}"
+            finally:
+                self.tools.workspace = original_workspace
+            outputs.append(
+                f"validation_workdir={rel_workdir or '.'}\nvalidation_tool={validation.tool_name}\nvalidation_command={validation.command}\n{result}"
+            )
+            if not self._tool_succeeded(result):
+                break
+        return "\n\n===\n\n".join(outputs)
 
     def _with_auto_change_summary(self, text: str, transcript: List[Dict[str, Any]]) -> str:
         changed_files: List[str] = []
@@ -395,31 +423,76 @@ def build_vector_context(
     return "\n".join(lines).strip()
 
 
-def detect_validation_command(workspace: Path) -> Tuple[str, str] | None:
+def detect_validation_commands(workspace: Path, changed_files: List[str]) -> List[ValidationCommand]:
     workspace = workspace.resolve()
-    if (workspace / "package.json").exists():
-        return ("run_cmd", "npm test")
-    if (workspace / "pnpm-lock.yaml").exists():
-        return ("run_cmd", "pnpm test")
-    if (workspace / "yarn.lock").exists():
-        return ("run_cmd", "yarn test")
-    if (workspace / "Cargo.toml").exists():
-        return ("run_cmd", "cargo test")
-    if (workspace / "go.mod").exists():
-        return ("run_cmd", "go test ./...")
-    if (workspace / "pom.xml").exists():
-        return ("run_cmd", "mvn test")
-    if (workspace / "build.gradle").exists() or (workspace / "build.gradle.kts").exists():
-        return ("run_cmd", "gradlew test")
-    if list(workspace.glob("*.sln")) or list(workspace.rglob("*.csproj")):
-        return ("run_cmd", "dotnet test")
-    if (workspace / "pyproject.toml").exists():
-        text = (workspace / "pyproject.toml").read_text(encoding="utf-8", errors="replace").lower()
-        if "pytest" in text:
-            return ("run_cmd", "pytest")
-        return ("run_cmd", "python -m pytest")
-    if (workspace / "pytest.ini").exists() or (workspace / "conftest.py").exists():
-        return ("run_cmd", "pytest")
-    if (workspace / "requirements.txt").exists() or list(workspace.glob("test_*.py")) or (workspace / "tests").exists():
-        return ("run_cmd", "pytest")
+    candidate_dirs: List[Path] = []
+    if changed_files:
+        for rel in changed_files:
+            try:
+                p = (workspace / rel).resolve()
+            except Exception:
+                continue
+            start = p.parent if p.suffix else p
+            candidate_dirs.append(start)
+    else:
+        candidate_dirs.append(workspace)
+
+    commands: List[ValidationCommand] = []
+    seen: set[tuple[str, str, str]] = set()
+    for start in candidate_dirs:
+        for current in [start, *start.parents]:
+            if current == workspace.parent:
+                break
+            if workspace not in current.parents and current != workspace:
+                continue
+            validation = _detect_validation_command_in_dir(current, workspace)
+            if not validation:
+                continue
+            key = (validation.tool_name, validation.command, str(validation.workdir))
+            if key not in seen:
+                seen.add(key)
+                commands.append(validation)
+            break
+    if commands:
+        return commands
+    fallback = _detect_validation_command_in_dir(workspace, workspace)
+    return [fallback] if fallback else []
+
+
+def _detect_validation_command_in_dir(current: Path, workspace: Path) -> ValidationCommand | None:
+    if (current / "package.json").exists():
+        manager = _detect_js_package_manager(current, workspace)
+        return ValidationCommand("run_cmd", f"{manager} test", current)
+    if (current / "Cargo.toml").exists():
+        return ValidationCommand("run_cmd", "cargo test", current)
+    if (current / "go.mod").exists():
+        return ValidationCommand("run_cmd", "go test ./...", current)
+    if (current / "pom.xml").exists():
+        return ValidationCommand("run_cmd", "mvn test", current)
+    if (current / "build.gradle").exists() or (current / "build.gradle.kts").exists():
+        cmd = "gradlew.bat test" if (current / "gradlew.bat").exists() else "gradlew test"
+        return ValidationCommand("run_cmd", cmd, current)
+    if list(current.glob("*.sln")) or list(current.glob("*.csproj")):
+        return ValidationCommand("run_cmd", "dotnet test", current)
+    if (current / "pyproject.toml").exists():
+        text = (current / "pyproject.toml").read_text(encoding="utf-8", errors="replace").lower()
+        cmd = "pytest" if "pytest" in text else "python -m pytest"
+        return ValidationCommand("run_cmd", cmd, current)
+    if (current / "pytest.ini").exists() or (current / "conftest.py").exists():
+        return ValidationCommand("run_cmd", "pytest", current)
+    if (current / "requirements.txt").exists() or list(current.glob("test_*.py")) or (current / "tests").exists():
+        return ValidationCommand("run_cmd", "pytest", current)
     return None
+
+
+def _detect_js_package_manager(current: Path, workspace: Path) -> str:
+    for directory in [current, *current.parents]:
+        if workspace not in directory.parents and directory != workspace:
+            continue
+        if (directory / "pnpm-lock.yaml").exists():
+            return "pnpm"
+        if (directory / "yarn.lock").exists():
+            return "yarn"
+        if (directory / "package-lock.json").exists():
+            return "npm"
+    return "npm"
