@@ -5,7 +5,7 @@ import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 from paw_agent.llama_client import LlamaCppClient
 from paw_agent.memory import SkillStore
@@ -76,6 +76,7 @@ class PawAgent:
         self.vector_top_k = int(cfg["agent"].get("vector_top_k", 4))
         self.vector_max_chars = int(cfg["agent"].get("vector_max_chars", 2600))
         self.vector_include_global = bool(cfg["agent"].get("vector_include_global", False))
+        self.validation_command = detect_validation_command(self.workspace)
 
     def run(self, user_goal: str) -> AgentResult:
         messages: List[Dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -85,6 +86,17 @@ class PawAgent:
         vector_context = self._vector_context(user_goal)
         if vector_context:
             messages.append({"role": "system", "content": vector_context})
+        if self.validation_command:
+            tool_name, command = self.validation_command
+            messages.append(
+                {
+                    "role": "system",
+                    "content": (
+                        f"Detected project validation command: use {tool_name} with command "
+                        f"`{command}` after changes."
+                    ),
+                }
+            )
         messages.append({"role": "system", "content": TOOL_SPEC})
         messages.append({"role": "user", "content": user_goal})
 
@@ -166,6 +178,20 @@ class PawAgent:
                     changed_files.append(str(args["path"]))
                     validation_attempted = False
                     validation_succeeded = False
+                    auto_validation = self._auto_validate_after_change()
+                    if auto_validation:
+                        validation_attempted = True
+                        validation_succeeded = self._tool_succeeded(auto_validation)
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Automatic validation result after file change:\n"
+                                    f"{auto_validation}"
+                                ),
+                            }
+                        )
+                        transcript[-1]["auto_validation_result"] = auto_validation
                 if name in {"run_shell", "run_cmd", "run_powershell"}:
                     validation_attempted = True
                     if self._tool_succeeded(result):
@@ -215,6 +241,15 @@ class PawAgent:
     def _tool_succeeded(self, result: str) -> bool:
         first = result.splitlines()[0].strip().lower() if result else ""
         return first == "exit_code=0"
+
+    def _auto_validate_after_change(self) -> str:
+        if not self.validation_command:
+            return ""
+        tool_name, command = self.validation_command
+        try:
+            return self.tools.run(tool_name, {"command": command, "timeout_sec": 300})
+        except Exception as exc:
+            return f"TOOL_ERROR: automatic validation failed: {exc}"
 
     def _with_auto_change_summary(self, text: str, transcript: List[Dict[str, Any]]) -> str:
         changed_files: List[str] = []
@@ -358,3 +393,33 @@ def build_vector_context(
         lines.append(item)
         used += len(item)
     return "\n".join(lines).strip()
+
+
+def detect_validation_command(workspace: Path) -> Tuple[str, str] | None:
+    workspace = workspace.resolve()
+    if (workspace / "package.json").exists():
+        return ("run_cmd", "npm test")
+    if (workspace / "pnpm-lock.yaml").exists():
+        return ("run_cmd", "pnpm test")
+    if (workspace / "yarn.lock").exists():
+        return ("run_cmd", "yarn test")
+    if (workspace / "Cargo.toml").exists():
+        return ("run_cmd", "cargo test")
+    if (workspace / "go.mod").exists():
+        return ("run_cmd", "go test ./...")
+    if (workspace / "pom.xml").exists():
+        return ("run_cmd", "mvn test")
+    if (workspace / "build.gradle").exists() or (workspace / "build.gradle.kts").exists():
+        return ("run_cmd", "gradlew test")
+    if list(workspace.glob("*.sln")) or list(workspace.rglob("*.csproj")):
+        return ("run_cmd", "dotnet test")
+    if (workspace / "pyproject.toml").exists():
+        text = (workspace / "pyproject.toml").read_text(encoding="utf-8", errors="replace").lower()
+        if "pytest" in text:
+            return ("run_cmd", "pytest")
+        return ("run_cmd", "python -m pytest")
+    if (workspace / "pytest.ini").exists() or (workspace / "conftest.py").exists():
+        return ("run_cmd", "pytest")
+    if (workspace / "requirements.txt").exists() or list(workspace.glob("test_*.py")) or (workspace / "tests").exists():
+        return ("run_cmd", "pytest")
+    return None

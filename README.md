@@ -13,6 +13,7 @@ It is designed to enforce concise, tool-driven execution: inspect files, plan st
 - Per-file rollback snapshots before writes.
 - Per-project sessions and skills (isolated by folder).
 - Optional global vector database.
+- Automatic validation command detection for common stacks (`pytest`, `npm test`, `cargo test`, `go test`, `dotnet test`, etc.).
 
 ## Requirements
 
