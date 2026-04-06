@@ -102,7 +102,6 @@ Auto retrieval is enabled by default in the agent loop. Paw-Agent injects top re
 
 - Local state is stored under `./.paw-agent/` by default.
 - File writes create rollback snapshots under `./.paw-agent/history/`.
-- Sensitive local files and caches are excluded via `.gitignore`.
 - Web search is tool-based and only used when invoked by the agent plan.
 
 ## Launch From Any Folder
