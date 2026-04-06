@@ -107,26 +107,9 @@ Auto retrieval is enabled by default in the agent loop. Paw-Agent injects top re
 
 ## Launch From Any Folder
 
-Add repo folder to `PATH` so `paw` works anywhere:
-
-```text
-C:\Users\b2o\Paw-Agent\paw-agent
-```
+Add repo folder to `PATH` so `paw` works anywhere.
 
 Then run `paw` from any project folder. Each folder gets isolated local state.
-
-## Publishing This Repository
-
-```powershell
-git init
-git add .
-git commit -m "Initial Paw-Agent release"
-git branch -M main
-git remote add origin <YOUR_GITHUB_REPO_URL>
-git push -u origin main
-```
-
-After push, set this README as the project landing page on GitHub.
 
 Inspect server-reported llama.cpp details:
 
