@@ -86,27 +86,23 @@ class PawAgent:
         self.root_validation_commands = detect_validation_commands(self.workspace, [])
 
     def run(self, user_goal: str) -> AgentResult:
-        messages: List[Dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        system_parts: List[str] = [SYSTEM_PROMPT.strip()]
         skill_context = self._skill_context(user_goal)
         if skill_context:
-            messages.append({"role": "system", "content": skill_context})
+            system_parts.append(skill_context.strip())
         vector_context = self._vector_context(user_goal)
         if vector_context:
-            messages.append({"role": "system", "content": vector_context})
+            system_parts.append(vector_context.strip())
         if self.root_validation_commands:
             detected = "; ".join(
                 f"{v.tool_name} `{v.command}` in `{v.workdir}`" for v in self.root_validation_commands[:3]
             )
-            messages.append(
-                {
-                    "role": "system",
-                    "content": (
-                        "Detected project validation command(s): "
-                        f"{detected}. After edits, validate the changed subproject(s)."
-                    ),
-                }
+            system_parts.append(
+                "Detected project validation command(s): "
+                f"{detected}. After edits, validate the changed subproject(s)."
             )
-        messages.append({"role": "system", "content": TOOL_SPEC})
+        system_parts.append(TOOL_SPEC.strip())
+        messages: List[Dict[str, str]] = [{"role": "system", "content": "\n\n".join(system_parts)}]
         messages.append({"role": "user", "content": user_goal})
 
         transcript: List[Dict[str, Any]] = []
