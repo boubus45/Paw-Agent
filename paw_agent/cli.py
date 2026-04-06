@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -57,9 +59,9 @@ def cmd_repl(args: argparse.Namespace) -> int:
     cfg = load_config()
     workspace = Path(args.workspace or cfg["agent"].get("workspace", ".")).resolve()
     agent = PawAgent(cfg, workspace=workspace)
-    session_id = args.session_id or datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    session_id = args.session_id or _new_session_id()
     turns = _load_chat_turns(session_id)
-    _print_repl_banner(cfg, workspace)
+    _print_repl_banner(cfg, workspace, session_id)
     print(f"chat_session: {session_id}")
     print("Type your prompt or `/help` for commands.\n")
     last_session_path = ""
@@ -74,7 +76,7 @@ def cmd_repl(args: argparse.Namespace) -> int:
         if prompt.lower() in {"exit", "quit", "/exit", "/quit"}:
             break
         if prompt.startswith("/"):
-            handled = _handle_repl_command(prompt, cfg, workspace)
+            handled = _handle_repl_command(prompt, cfg, workspace, session_id)
             if not handled:
                 print("Unknown command. Use `/help`.")
             continue
@@ -103,9 +105,8 @@ def cmd_repl(args: argparse.Namespace) -> int:
         except requests.RequestException as exc:
             print(f"Model server connection failed: {exc}")
             print("Use `paw doctor` then start llama-server.")
-    if turns:
-        print(f"Resume this chat with: paw resume {session_id}")
-    elif last_session_path:
+    print(f"Resume this chat with: paw resume {session_id}")
+    if not turns and last_session_path:
         print(f"Last run session file: {last_session_path}")
     return 0
 
@@ -226,10 +227,9 @@ def cmd_vector_stats(args: argparse.Namespace) -> int:
     return 0
 
 
-def _print_repl_banner(cfg: dict, workspace: Path) -> None:
+def _print_repl_banner(cfg: dict, workspace: Path, session_id: str) -> None:
     model_cfg = cfg["model"]
     info = LlamaCppClient.fetch_server_info(model_cfg["base_url"], timeout_sec=4)
-    session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     lines = [
         "Paw-Agent Interactive",
         f"session: {session_id}",
@@ -247,14 +247,14 @@ def _print_repl_banner(cfg: dict, workspace: Path) -> None:
     print("+" + "-" * width + "+")
 
 
-def _handle_repl_command(cmd: str, cfg: dict, workspace: Path) -> bool:
+def _handle_repl_command(cmd: str, cfg: dict, workspace: Path, session_id: str) -> bool:
     parts = cmd.strip().split(maxsplit=1)
     c = parts[0].lower()
     if c == "/help":
         print("Commands: /help, /status, /doctor, /skills, /sessions, /vector, /rollback <path>, /exit")
         return True
     if c == "/status":
-        _print_repl_banner(cfg, workspace)
+        _print_repl_banner(cfg, workspace, session_id)
         return True
     if c == "/doctor":
         ns = argparse.Namespace()
@@ -303,6 +303,23 @@ def _chat_session_path(session_id: str) -> Path:
     safe = safe or datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
     return SESSIONS_DIR / f"chat-{safe}.json"
+
+
+def _new_session_id() -> str:
+    if hasattr(uuid, "uuid7"):
+        return str(uuid.uuid7())
+    ts_ms = int(time.time() * 1000) & ((1 << 48) - 1)
+    rand = int.from_bytes(os.urandom(10), "big")
+    time_low = (ts_ms >> 16) & 0xFFFFFFFF
+    time_mid = ts_ms & 0xFFFF
+    time_hi_and_version = (0x7 << 12) | ((rand >> 68) & 0x0FFF)
+    clock_seq_hi_and_reserved = 0x80 | ((rand >> 62) & 0x3F)
+    clock_seq_low = (rand >> 54) & 0xFF
+    node = rand & ((1 << 48) - 1)
+    return (
+        f"{time_low:08x}-{time_mid:04x}-{time_hi_and_version:04x}-"
+        f"{clock_seq_hi_and_reserved:02x}{clock_seq_low:02x}-{node:012x}"
+    )
 
 
 def _load_chat_turns(session_id: str) -> list[dict]:
