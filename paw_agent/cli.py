@@ -12,24 +12,12 @@ import requests
 from paw_agent.agent import PawAgent
 from paw_agent.config import CONFIG_PATH, SKILLS_DIR, SESSIONS_DIR, init_config, load_config, save_config
 from paw_agent.llama_client import LlamaCppClient
-from paw_agent.presets import MODEL_PRESETS, apply_preset
 from paw_agent.tools import ToolRuntime
 from paw_agent.vector_store import VectorStore, resolve_vector_db_path
 
 
 def cmd_init(args: argparse.Namespace) -> int:
     cfg_path = init_config()
-    cfg = load_config()
-    if args.preset:
-        ok = apply_preset(cfg, args.preset)
-        if not ok:
-            print(f"Unknown preset: {args.preset}")
-            print("Available presets:")
-            for name in MODEL_PRESETS:
-                print(f"- {name}")
-            return 2
-        save_config(cfg)
-        print(f"Applied preset: {args.preset}")
     print(f"Config file: {cfg_path}")
     return 0
 
@@ -362,7 +350,6 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
 
     p_init = sub.add_parser("init", help="Create config file")
-    p_init.add_argument("--preset", help="Apply tuned model preset")
     p_init.set_defaults(func=cmd_init)
 
     p_chat = sub.add_parser("chat", help="Run one-shot task")
