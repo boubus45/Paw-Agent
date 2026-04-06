@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local/secret/state (never commit)
+.paw-agent/
+.test_tmp/
+.pip_tmp/
+.pytest_tmp/
+tmp_test_dir/
+pytest-cache-files-*/
+
+# Environment / editor
+.env
+.env.*
+.vscode/
+.idea/
