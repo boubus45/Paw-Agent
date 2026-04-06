@@ -32,7 +32,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "temperature": 0.15,
         "top_p": 0.9,
         "max_tokens": 512,
-        "request_timeout_sec": 300,
+        "request_timeout_sec": 32865,
     },
 }
 

@@ -26,7 +26,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
     cfg = load_config()
     workspace = Path(args.workspace or cfg["agent"].get("workspace", ".")).resolve()
     agent = PawAgent(cfg, workspace=workspace)
-    info = LlamaCppClient.fetch_server_info(cfg["model"]["base_url"], timeout_sec=5)
+    info = LlamaCppClient.fetch_server_info(cfg["model"]["base_url"], timeout_sec=180)
     model_name = info.get("model") or agent.client.model
     ctx_value = info.get("ctx") if info.get("ctx") is not None else "unknown"
     try:
@@ -153,7 +153,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(f"Config: {CONFIG_PATH}")
     print(f"Configured model hint: {model_cfg['model']}")
     print(f"Base URL: {model_cfg['base_url']}")
-    print(f"Request timeout: {model_cfg.get('request_timeout_sec', 300)} sec")
+    print(f"Request timeout: {model_cfg.get('request_timeout_sec', 32865)} sec")
     info = LlamaCppClient.fetch_server_info(model_cfg["base_url"], timeout_sec=6)
     print(f"\nServer status: {info.get('status')}")
     print(f"Loaded model: {info.get('model') or 'unknown'}")

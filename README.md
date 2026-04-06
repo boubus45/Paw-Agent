@@ -8,6 +8,7 @@ It is designed to enforce concise, tool-driven execution: inspect files, plan st
 - Interactive CLI (`paw`) with Hermes-style workflow.
 - Multi-step tool loop for coding tasks.
 - Built-in tools: `read_file`, `write_file`, `rollback_file`, `list_files`, `search`, `run_shell`, `web_search`.
+- Windows-aware command tools: `run_cmd`, `run_powershell`, plus generic `run_shell`.
 - Auto vector retrieval from indexed project files.
 - Per-file rollback snapshots before writes.
 - Per-project sessions and skills (isolated by folder).

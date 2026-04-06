@@ -20,7 +20,7 @@ Return ONLY valid JSON with this schema:
   "status": "continue" | "done",
   "assistant_response": "very short user-facing update",
   "tool_call": {
-    "name": "read_file|write_file|rollback_file|list_files|search|run_shell|web_search",
+    "name": "read_file|write_file|rollback_file|list_files|search|run_shell|run_cmd|run_powershell|web_search",
     "args": { ... }
   } | null
 }
@@ -32,7 +32,10 @@ Rules:
 - For coding tasks, operate step-by-step:
   1) inspect files, 2) change one focused file or small set per step,
   3) run validation, 4) finalize.
-- If writing code, verify with run_shell tests when reasonable.
+- After any file change, you must run a validation command before finishing.
+- If validation fails, debug and fix the issue before finishing.
+- Use run_cmd or run_powershell on Windows when the shell matters.
+- If blocked on an unfamiliar error, use web_search and continue fixing.
 - Use rollback_file(path) if a write was incorrect.
 - If done, set status to "done" and tool_call to null, and include a concise summary
   of changed files and verification status in assistant_response.
@@ -64,7 +67,7 @@ class PawAgent:
             temperature=float(model_cfg["temperature"]),
             top_p=float(model_cfg["top_p"]),
             max_tokens=int(model_cfg["max_tokens"]),
-            request_timeout_sec=int(model_cfg.get("request_timeout_sec", 300)),
+            request_timeout_sec=int(model_cfg.get("request_timeout_sec", 32865)),
         )
         self.tools = ToolRuntime(self.workspace)
         self.skills = SkillStore()
@@ -88,6 +91,9 @@ class PawAgent:
         transcript: List[Dict[str, Any]] = []
         final_response = ""
         tool_calls = 0
+        changed_files: List[str] = []
+        validation_attempted = False
+        validation_succeeded = False
 
         for step in range(1, self.max_steps + 1):
             client = self.client
@@ -109,6 +115,29 @@ class PawAgent:
             status = str(action.get("status", "continue")).lower()
             tool_call = action.get("tool_call")
             if status == "done" and not tool_call:
+                if changed_files and not validation_attempted:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "You changed files but have not validated the project yet. "
+                                "Run an appropriate validation command now using run_cmd, "
+                                "run_powershell, or run_shell before finishing."
+                            ),
+                        }
+                    )
+                    continue
+                if changed_files and not validation_succeeded:
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Validation has not succeeded yet. Continue debugging, fixing, "
+                                "and re-running validation. If you are stuck, use web_search."
+                            ),
+                        }
+                    )
+                    continue
                 final_response = self._with_auto_change_summary(final_response, transcript)
                 session_path = self._save_session(user_goal, transcript, final_response, tool_calls, step)
                 self._capture_skill_if_needed(user_goal, transcript, tool_calls, final_response)
@@ -133,10 +162,28 @@ class PawAgent:
                 args = dict(tool_call.get("args", {}))
                 result = self.tools.run(name, args)
                 tool_calls += 1
+                if name == "write_file" and args.get("path"):
+                    changed_files.append(str(args["path"]))
+                    validation_attempted = False
+                    validation_succeeded = False
+                if name in {"run_shell", "run_cmd", "run_powershell"}:
+                    validation_attempted = True
+                    if self._tool_succeeded(result):
+                        validation_succeeded = True
             except Exception as exc:
                 result = f"TOOL_ERROR: {exc}\n{traceback.format_exc(limit=1)}"
             messages.append({"role": "user", "content": f"Tool result:\n{result}"})
             transcript[-1]["tool_result"] = result
+            if name in {"run_shell", "run_cmd", "run_powershell"} and changed_files and not self._tool_succeeded(result):
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Validation failed. Inspect the error, fix the problem, and run "
+                            "validation again. Use web_search if the error is unfamiliar."
+                        ),
+                    }
+                )
 
         session_path = self._save_session(user_goal, transcript, final_response, tool_calls, self.max_steps)
         return AgentResult(
@@ -165,6 +212,10 @@ class PawAgent:
             return t
         return t[: max_chars - 3].rstrip() + "..."
 
+    def _tool_succeeded(self, result: str) -> bool:
+        first = result.splitlines()[0].strip().lower() if result else ""
+        return first == "exit_code=0"
+
     def _with_auto_change_summary(self, text: str, transcript: List[Dict[str, Any]]) -> str:
         changed_files: List[str] = []
         rollback_files: List[str] = []
@@ -181,6 +232,10 @@ class PawAgent:
             if name == "rollback_file" and isinstance(args, dict) and args.get("path"):
                 rollback_files.append(str(args["path"]))
             if name == "run_shell":
+                tests_run = True
+            if name == "run_cmd":
+                tests_run = True
+            if name == "run_powershell":
                 tests_run = True
         if not changed_files and not rollback_files and not tests_run:
             return self._compact_response(text)

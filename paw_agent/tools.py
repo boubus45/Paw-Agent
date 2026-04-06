@@ -28,6 +28,10 @@ class ToolRuntime:
             return self.search(args["pattern"], args.get("path", "."))
         if name == "run_shell":
             return self.run_shell(args["command"], int(args.get("timeout_sec", 120)))
+        if name == "run_cmd":
+            return self.run_cmd(args["command"], int(args.get("timeout_sec", 120)))
+        if name == "run_powershell":
+            return self.run_powershell(args["command"], int(args.get("timeout_sec", 120)))
         if name == "web_search":
             return self.web_search(args["query"], int(args.get("limit", 5)))
         if name == "rollback_file":
@@ -98,10 +102,34 @@ class ToolRuntime:
         return "\n".join(hits) if hits else "No matches."
 
     def run_shell(self, command: str, timeout_sec: int) -> str:
+        return self._run_subprocess(command, timeout_sec, shell=True)
+
+    def run_cmd(self, command: str, timeout_sec: int) -> str:
+        return self._run_subprocess(
+            ["cmd.exe", "/d", "/s", "/c", command],
+            timeout_sec,
+            shell=False,
+        )
+
+    def run_powershell(self, command: str, timeout_sec: int) -> str:
+        return self._run_subprocess(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                command,
+            ],
+            timeout_sec,
+            shell=False,
+        )
+
+    def _run_subprocess(self, command: Any, timeout_sec: int, shell: bool) -> str:
         proc = subprocess.run(
             command,
             cwd=str(self.workspace),
-            shell=True,
+            shell=shell,
             capture_output=True,
             text=True,
             timeout=timeout_sec,
@@ -195,5 +223,7 @@ Available tools:
 - list_files(path?, limit?)
 - search(pattern, path?)
 - run_shell(command, timeout_sec?)
+- run_cmd(command, timeout_sec?)
+- run_powershell(command, timeout_sec?)
 - web_search(query, limit?)
 """
