@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 import requests
 
@@ -37,6 +37,43 @@ class LlamaCppClient:
         resp.raise_for_status()
         data: Dict[str, Any] = resp.json()
         return data["choices"][0]["message"]["content"]
+
+    def chat_stream(self, messages: List[Dict[str, str]], on_text: Callable[[str], None]) -> str:
+        url = f"{self.base_url}/chat/completions"
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "max_tokens": self.max_tokens,
+            "stream": True,
+        }
+        resp = requests.post(url, json=payload, timeout=(8, self.request_timeout_sec), stream=True)
+        resp.raise_for_status()
+        chunks: List[str] = []
+        for raw_line in resp.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue
+            line = raw_line.strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                obj = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            choices = obj.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta") or {}
+            text = delta.get("content")
+            if not text:
+                continue
+            chunks.append(text)
+            on_text(text)
+        return "".join(chunks)
 
     @staticmethod
     def discover_model_id(base_url: str, timeout_sec: int = 5) -> str:

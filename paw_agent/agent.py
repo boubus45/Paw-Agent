@@ -5,7 +5,7 @@ import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Protocol
 
 from paw_agent.llama_client import LlamaCppClient
 from paw_agent.memory import SkillStore
@@ -20,15 +20,17 @@ Return ONLY valid JSON with this schema:
   "status": "continue" | "done",
   "assistant_response": "very short user-facing update",
   "tool_call": {
-    "name": "read_file|write_file|rollback_file|list_files|search|run_shell|run_cmd|run_powershell|web_search",
+    "name": "read_file|write_file|replace_in_file|rollback_file|list_files|search|run_shell|run_cmd|run_powershell|web_search",
     "args": { ... }
   } | null
 }
 Rules:
-- No chit-chat, no motivational text, no filler.
-- Keep assistant_response concise: max 2 short sentences.
+- Be concise and clear.
+- Keep assistant_response reasonably short.
 - Prefer list_files/search before reading many files.
 - Read only targeted files and keep outputs concise.
+- Prefer replace_in_file for focused edits to existing files.
+- Use write_file mainly for new files or full rewrites when necessary.
 - For coding tasks, operate step-by-step:
   1) inspect files, 2) change one focused file or small set per step,
   3) run validation, 4) finalize.
@@ -57,10 +59,20 @@ class ValidationCommand:
     workdir: Path
 
 
+class AgentObserver(Protocol):
+    def on_step_start(self, step: int) -> None: ...
+    def on_model_text(self, text: str) -> None: ...
+    def on_model_done(self) -> None: ...
+    def on_tool_call(self, name: str, args: Dict[str, Any]) -> None: ...
+    def on_tool_result(self, name: str, result: str) -> None: ...
+    def on_info(self, message: str) -> None: ...
+
+
 class PawAgent:
-    def __init__(self, cfg: Dict[str, Any], workspace: Path):
+    def __init__(self, cfg: Dict[str, Any], workspace: Path, observer: AgentObserver | None = None):
         self.cfg = cfg
         self.workspace = workspace.resolve()
+        self.observer = observer
         model_cfg = cfg["model"]
         selected_model = str(model_cfg.get("model", "auto"))
         if selected_model.lower() in {"", "auto"}:
@@ -114,7 +126,9 @@ class PawAgent:
 
         for step in range(1, self.max_steps + 1):
             client = self.client
-            raw = client.chat(messages)
+            self._notify_step_start(step)
+            raw = client.chat_stream(messages, self._notify_model_text)
+            self._notify_model_done()
             action = self._parse_action(raw)
             assistant_response = self._compact_response(str(action.get("assistant_response", "")).strip())
             final_response = assistant_response or final_response
@@ -177,9 +191,10 @@ class PawAgent:
             try:
                 name = str(tool_call["name"])
                 args = dict(tool_call.get("args", {}))
+                self._notify_tool_call(name, args)
                 result = self.tools.run(name, args)
                 tool_calls += 1
-                if name == "write_file" and args.get("path"):
+                if name in {"write_file", "replace_in_file"} and args.get("path"):
                     changed_files.append(str(args["path"]))
                     validation_attempted = False
                     validation_succeeded = False
@@ -187,6 +202,8 @@ class PawAgent:
                     if auto_validation:
                         validation_attempted = True
                         validation_succeeded = self._all_validations_succeeded(auto_validation)
+                        self._notify_info("Automatic validation executed.")
+                        self._notify_tool_result("automatic_validation", auto_validation)
                         messages.append(
                             {
                                 "role": "user",
@@ -203,6 +220,7 @@ class PawAgent:
                         validation_succeeded = True
             except Exception as exc:
                 result = f"TOOL_ERROR: {exc}\n{traceback.format_exc(limit=1)}"
+            self._notify_tool_result(name, result)
             messages.append({"role": "user", "content": f"Tool result:\n{result}"})
             transcript[-1]["tool_result"] = result
             if name in {"run_shell", "run_cmd", "run_powershell"} and changed_files and not self._tool_succeeded(result):
@@ -247,6 +265,30 @@ class PawAgent:
         first = result.splitlines()[0].strip().lower() if result else ""
         return first == "exit_code=0"
 
+    def _notify_step_start(self, step: int) -> None:
+        if self.observer:
+            self.observer.on_step_start(step)
+
+    def _notify_model_text(self, text: str) -> None:
+        if self.observer:
+            self.observer.on_model_text(text)
+
+    def _notify_model_done(self) -> None:
+        if self.observer:
+            self.observer.on_model_done()
+
+    def _notify_tool_call(self, name: str, args: Dict[str, Any]) -> None:
+        if self.observer:
+            self.observer.on_tool_call(name, args)
+
+    def _notify_tool_result(self, name: str, result: str) -> None:
+        if self.observer:
+            self.observer.on_tool_result(name, result)
+
+    def _notify_info(self, message: str) -> None:
+        if self.observer:
+            self.observer.on_info(message)
+
     def _all_validations_succeeded(self, result: str) -> bool:
         if not result.strip():
             return False
@@ -286,7 +328,7 @@ class PawAgent:
                 continue
             name = str(call.get("name", ""))
             args = call.get("args", {})
-            if name == "write_file" and isinstance(args, dict) and args.get("path"):
+            if name in {"write_file", "replace_in_file"} and isinstance(args, dict) and args.get("path"):
                 changed_files.append(str(args["path"]))
             if name == "rollback_file" and isinstance(args, dict) and args.get("path"):
                 rollback_files.append(str(args["path"]))

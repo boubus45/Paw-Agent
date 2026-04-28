@@ -22,6 +22,13 @@ class ToolRuntime:
             return self.read_file(args["path"], int(args.get("max_chars", 12000)))
         if name == "write_file":
             return self.write_file(args["path"], args["content"])
+        if name == "replace_in_file":
+            return self.replace_in_file(
+                args["path"],
+                args["old"],
+                args["new"],
+                int(args.get("count", 1)),
+            )
         if name == "list_files":
             return self.list_files(args.get("path", "."), int(args.get("limit", 300)))
         if name == "search":
@@ -51,6 +58,16 @@ class ToolRuntime:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         return f"Wrote {len(content)} chars to {path}"
+
+    def replace_in_file(self, rel_path: str, old: str, new: str, count: int) -> str:
+        path = self._resolve(rel_path)
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if old not in text:
+            return f"Text to replace not found in {rel_path}"
+        self._snapshot_file(path)
+        replaced = text.replace(old, new, max(1, count))
+        path.write_text(replaced, encoding="utf-8")
+        return f"Replaced text in {rel_path}"
 
     def rollback_file(self, rel_path: str) -> str:
         path = self._resolve(rel_path)
@@ -219,6 +236,7 @@ TOOL_SPEC = """
 Available tools:
 - read_file(path, max_chars?)
 - write_file(path, content)
+- replace_in_file(path, old, new, count?)
 - rollback_file(path)
 - list_files(path?, limit?)
 - search(pattern, path?)

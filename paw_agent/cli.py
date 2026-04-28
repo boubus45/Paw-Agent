@@ -18,6 +18,38 @@ from paw_agent.tools import ToolRuntime
 from paw_agent.vector_store import VectorStore, resolve_vector_db_path
 
 
+class ConsoleObserver:
+    def __init__(self) -> None:
+        self._in_model_block = False
+
+    def on_step_start(self, step: int) -> None:
+        if self._in_model_block:
+            print()
+            self._in_model_block = False
+        print(f"\n[step {step}]")
+
+    def on_model_text(self, text: str) -> None:
+        if not self._in_model_block:
+            print("[model] ", end="", flush=True)
+            self._in_model_block = True
+        print(text, end="", flush=True)
+
+    def on_model_done(self) -> None:
+        if self._in_model_block:
+            print()
+            self._in_model_block = False
+
+    def on_tool_call(self, name: str, args: dict) -> None:
+        print(f"[tool] {name} {json.dumps(args, ensure_ascii=False)}")
+
+    def on_tool_result(self, name: str, result: str) -> None:
+        print(f"[tool-result:{name}]")
+        print(result)
+
+    def on_info(self, message: str) -> None:
+        print(f"[info] {message}")
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     cfg_path = init_config()
     print(f"Config file: {cfg_path}")
@@ -27,8 +59,8 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_chat(args: argparse.Namespace) -> int:
     cfg = load_config()
     workspace = Path(args.workspace or cfg["agent"].get("workspace", ".")).resolve()
-    agent = PawAgent(cfg, workspace=workspace)
-    info = LlamaCppClient.fetch_server_info(cfg["model"]["base_url"], timeout_sec=180)
+    agent = PawAgent(cfg, workspace=workspace, observer=ConsoleObserver())
+    info = LlamaCppClient.fetch_server_info(cfg["model"]["base_url"], timeout_sec=8)
     model_name = info.get("model") or agent.client.model
     ctx_value = info.get("ctx") if info.get("ctx") is not None else "unknown"
     try:
@@ -58,7 +90,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
 def cmd_repl(args: argparse.Namespace) -> int:
     cfg = load_config()
     workspace = Path(args.workspace or cfg["agent"].get("workspace", ".")).resolve()
-    agent = PawAgent(cfg, workspace=workspace)
+    agent = PawAgent(cfg, workspace=workspace, observer=ConsoleObserver())
     session_id = args.session_id or _new_session_id()
     turns = _load_chat_turns(session_id)
     _print_repl_banner(cfg, workspace, session_id)
@@ -350,14 +382,14 @@ def _save_chat_turns(session_id: str, turns: list[dict], workspace: Path) -> Non
 def _prepare_prompt_with_history(turns: list[dict], prompt: str) -> str:
     if not turns:
         return prompt
-    # Keep short context for small models.
-    recent = turns[-6:]
+    # Keep context lean for small local models.
+    recent = turns[-4:]
     lines = ["Conversation history (most recent first):"]
     for t in reversed(recent):
         u = str(t.get("user", "")).strip().replace("\n", " ")
         a = str(t.get("assistant", "")).strip().replace("\n", " ")
-        lines.append(f"User: {u[:240]}")
-        lines.append(f"Assistant: {a[:240]}")
+        lines.append(f"User: {u[:160]}")
+        lines.append(f"Assistant: {a[:160]}")
     lines.append(f"Current user request: {prompt}")
     return "\n".join(lines)
 
